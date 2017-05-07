@@ -1,0 +1,664 @@
+<?php
+
+/**
+ * @file
+ * tehnoprah.module
+ */
+
+function tehnoprah_url_inbound_alter(&$path, $original_path, $path_language) {
+	global $language;
+	if (preg_match('|'.t('products').'\/?|', $path, $matches)) {
+		$nodes = node_load_multiple(array(), array('type' => 'product_page', 'language' => $language->language));
+		foreach($nodes as $key => $node) {
+			$path = 'node/'.$key;
+			break;
+		}
+	}
+}
+ 
+function tehnoprah_menu() {
+    $items = array();
+    $items['sort-products-ajaxcall'] = array(
+        'title' => t('sort products'),
+        'page callback' => '_get_sort_products',
+        'access arguments' => array('access content'),
+        'type' => MENU_CALLBACK
+    );
+    $items['search-selection-change-ajaxcall'] = array(
+        'title' => t('new search bar'),
+        'page callback' => '_get_search_bar_ajax',
+        'access arguments' => array('access content'),
+        'type' => MENU_CALLBACK
+    );
+    $items['send-email-ajaxcall'] = array(
+        'title' => t('send email'),
+        'page callback' => '_send_email_from_object',
+        'access arguments' => array('access content'),
+        'type' => MENU_CALLBACK
+    );
+    $items['admin-subcategories-ajax'] = array(
+        'title' => t('change subcategories options'),
+        'page callback' => '_admin_subcategories',
+        'access arguments' => array('access content'),
+        'type' => MENU_CALLBACK
+    );
+    $items['change-language-ajaxcall'] = array(
+        'title' => t('change language'),
+        'page callback' => '_change_language',
+        'access arguments' => array('access content'),
+        'type' => MENU_CALLBACK
+    );
+    $items['site-search-ajaxcall'] = array(
+        'title' => t('site search'),
+        'page callback' => '_site_search',
+        'access arguments' => array('access content'),
+        'type' => MENU_CALLBACK
+    );
+	
+    return $items;
+}
+
+function tehnoprah_page_alter(&$page) {
+    $node = menu_get_object();
+    global $nid;
+    $nid = isset($node->nid) ? $node->nid : 0;
+	$tnid = isset($node->tnid) ? $node->tnid : 0;
+    global $language;
+    $bundle = isset($page['content']['system_main']['nodes'][$nid]['#bundle']) ? $page['content']['system_main']['nodes'][$nid]['#bundle'] : '';
+	
+    if( $nid == 2 || $tnid == 2 ) {
+        /*$bundles = array( 'article', 'basic_article', 'page', 'brand', 'category', 'category_page', 'product', 'product_page', 'subcategory' );
+		foreach( $bundles as $bun )
+			_copy_all_nodes($bun, 'hr', 'it');*/
+    } elseif ( $bundle == 'product_page' ) {
+		$path = $_SERVER['REQUEST_URI'];
+		$matches = explode(t('proizvodi').'/', $path);
+		$searchTitle = '';
+		if(isset($matches[1])) {
+			$matches = $matches[1];
+			$matches = explode('/', $matches);
+			
+			if(isset($matches[2])) {
+				$path = drupal_lookup_path('source', explode('?', $matches[2])[0]);
+				$psBrand = menu_get_object('node', 1, $path);
+				if(isset($psBrand->title) && $searchTitle == '') {
+					$searchTitle = $psBrand->title;
+				}
+			}
+			if(isset($matches[1])) {
+				$path = drupal_lookup_path('source', $matches[1]);
+				$psSubcategory = menu_get_object('node', 1, $path);
+				if(isset($psSubcategory->title) && $searchTitle == '') {
+					$searchTitle = $psSubcategory->title;
+				}
+			}
+			if(isset($matches[0])) {
+				$path = drupal_lookup_path('source', $matches[0]);
+				$psCategory = menu_get_object('node', 1, $path);
+				if(isset($psCategory->title) && $searchTitle == '') {
+					$searchTitle = $psCategory->title;
+				}
+			}
+		}
+		
+		$psCategory = (isset($psCategory) ? $psCategory->nid : 0);
+		$psSubcategory = (isset($psSubcategory) ? $psSubcategory->nid : 0);
+		$psBrand = (isset($psBrand) ? $psBrand->nid : 0);
+		$count = $page['content']['system_main']['nodes'][$nid]['field_number_of_products'][0]['#markup'];
+		//$page['content']['system_main']['nodes'][$nid]['search'] = get_search_bar($psCategory, $psSubcategory, $psBrand);
+		$pageNum = isset($_GET['page']) ? $_GET['page'] : 1;
+		$products = json_decode(sort_products($psCategory, $psSubcategory, $psBrand, $pageNum, $count));
+		$page['content']['system_main']['nodes'][$nid]['searchTitle'] = t('Prikaz proizvoda').($searchTitle != '' ? ' - '.$searchTitle : '');
+		$page['content']['system_main']['nodes'][$nid]['pageNum'] = $pageNum;
+		$page['content']['system_main']['nodes'][$nid]['totalProducts'] = $products->total;
+		$page['content']['system_main']['nodes'][$nid]['products'] = $products->products;
+	} elseif ( $bundle == 'category_page' ) {
+		$page['content']['system_main']['nodes'][$nid]['categories'] = node_load_multiple(array(), array('language' => $language->language, 'type' => 'category'));
+		uksort($page['content']['system_main']['nodes'][$nid]['categories'], 'custom_title_compare');
+	} elseif ( $bundle == 'category' ) {
+		$page['content']['system_main']['nodes'][$nid]['subcategories'] = [];
+		$query = new EntityFieldQuery();
+		$query->entityCondition('entity_type', 'node')
+			->entityCondition('bundle', 'subcategory')
+			->entityCondition('language', $node->language)
+			->propertyOrderBy('title');
+		
+		if( $result = $query->execute() ) {
+			$subcategories = [];
+			foreach( $result['node'] as $key => $target ) {
+				$subcategory = node_load($key);
+				if(isset($subcategory->field_belongs_to['und'][0]['target_id']) && $subcategory->field_belongs_to['und'][0]['target_id'] == $nid) {
+					$weight = (isset($subcategory->field_weight['und']) ? $subcategory->field_weight['und'][0]['value'] : 0);
+					$subcategories[$weight] = $subcategory;
+				}
+			}
+			ksort($subcategories);
+			$page['content']['system_main']['nodes'][$nid]['subcategories'] = $subcategories;
+		}
+	}
+    
+	global $user;
+	global $currentUser;
+	$currentUser = user_load($user->uid);
+	
+    drupal_add_js(drupal_get_path('module', 'tehnoprah').'/js/custom.js',
+        array('type' => 'file', 'scope' => 'footer', 'weight' => 1)
+    );
+
+    //fancyBox gallery
+    drupal_add_css(drupal_get_path('module', 'tehnoprah').'/js/fancyBox/source/jquery.fancybox.css', array('group' => CSS_THEME, 'every_page' => FALSE));
+    drupal_add_js(drupal_get_path('module', 'tehnoprah').'/js/fancyBox/source/jquery.fancybox.js',
+    array('type' => 'file', 'scope' => 'footer', 'weight' => 3)
+    );
+    drupal_add_js(drupal_get_path('module', 'tehnoprah').'/js/fancyBox/source/helpers/jquery.fancybox-buttons.js',
+    array('type' => 'file', 'scope' => 'footer', 'weight' => 4)
+    );
+    drupal_add_js(drupal_get_path('module', 'tehnoprah').'/js/fancyBox/source/helpers/jquery.fancybox-media.js',
+    array('type' => 'file', 'scope' => 'footer', 'weight' => 5)
+    );
+    drupal_add_js(drupal_get_path('module', 'tehnoprah').'/js/fancyBox/source/helpers/jquery.fancybox-thumbs.js',
+    array('type' => 'file', 'scope' => 'footer', 'weight' => 6)
+    );
+
+    $js = 'jQuery(".fancybox").fancybox({'
+            . 'openEffect	: "elastic",'
+            . 'closeEffect	: "elastic",'
+            . 'maxWidth	: "90%",'
+            . 'maxHeight	: "100%"'
+            . '});';
+    drupal_add_js($js,
+        array('type' => 'inline', 'scope' => 'footer', 'weight' => 7)
+    );
+}
+
+function custom_title_compare($a, $b) {
+	if(isset($a) && !isset($a->title)) {
+		$a = node_load($a);
+	} elseif(!isset($a)) {
+		return true;
+	}
+	if(isset($b) && !isset($b->title)) {
+		$b = node_load($b);
+	} elseif(!isset($b)) {
+		return false;
+	}
+	return $a->title > $b->title;
+}
+
+function get_search_bar( $psCategory, $psSubcategory, $producer ) {
+	global $language;
+	$psBrand = 0;
+	$producer = node_load_multiple(array(), array('language' => $language->language, 'type' => 'brand', 'title' => $producer));
+	foreach($producer as $key => $brand) {
+		$psBrand = $key;
+		break;
+	}
+	if($psCache = cache_get('sbc-'.$language->language.'-'.$psCategory.$psSubcategory.$psBrand, 'cache')) {
+		$ps = '<div class="product-search"><span class="search-label">'.t('Category').'</span>'
+			.'<select id="categories-dropdown"><option key="0">-- '.t('All categories').' --</option>';
+		foreach( $psCache->data['categories'] as $key => $category )
+			$ps .= '<option key="'.$key.'"'.(($psCategory == $key) ? ' selected="selected"' : '').'>'.$category.'</option>';
+		$ps .= '</select>';
+		
+		$ps .= '<span class="search-label">'.t('Subcategory').'</span>'
+			.'<select id="subcategories-dropdown"><option key="0">-- '.t('All subcategories').' --</option>';
+		foreach( $psCache->data['subcategories'] as $key => $subcategory )
+			$ps .= (isset($key) && $key > 0) ?'<option key="'.$key.'"'.(($psSubcategory == $key) ? ' selected="selected"' : '').'>'.$subcategory.'</option>' : '';
+		$ps .= '</select>';
+		
+		$ps .= '<span class="search-label">'.t('Brand').'</span>'
+			.'<select id="producer-dropdown"><option key="0">-- '.t('All brands').' --</option>';
+		foreach( $psCache->data['brands'] as $brand )
+			$ps .= '<option key="'.$key.'"'.(($psBrand == $key) ? ' selected="selected"' : '').'>'.$brand.'</option>';
+		$ps .= '</select>';
+		
+		$ps .= '<button class="simple-orange">'.t('Show').'</button>';
+		$ps .= '</div>';
+	} else {
+		$categories = node_load_multiple(array(), array('language' => $language->language, 'type' => 'category'));
+		$subcategories = array();
+		$brands = array();
+		
+		if($psCategory > 0) {
+			foreach($categories[$psCategory]->field_subcategories['und'] as $ckey => $cat) {
+				$subcategories[$cat['target_id']] = node_load($cat['target_id']);
+			}
+		} else {
+			$subcategories = node_load_multiple(array(), array('language' => $language->language, 'type' => 'subcategory'));
+		}
+		if($psCategory == 0 && $psSubcategory > 0) {
+			$subcategory = node_load($psSubcategory);
+			$psCategory = $subcategory->field_belongs_to['und'][0]['target_id'];
+		}
+		if($psSubcategory > 0) {
+			foreach($subcategories[$psSubcategory]->field_brands['und'] as $skey => $scat) {
+				$brands[$scat['target_id']] = node_load($scat['target_id']);
+			}
+		} else {
+			$brands = node_load_multiple(array(), array('language' => $language->language, 'type' => 'brand'));
+		}
+		/*
+		usort($categories, 'custom_title_compare');
+		usort($subcategories, 'custom_title_compare');
+		usort($brands, 'custom_title_compare');
+		*/
+		$allData = array();
+		$allData['categories'] = array();
+		$allData['subcategories'] = array();
+		$allData['brands'] = array();
+		foreach( $categories as $key => $category )
+			$allData['categories'][$category->nid] = $category->title;
+		foreach( $subcategories as $key => $subcategory )
+			$allData['subcategories'][$subcategory->nid] = $subcategory->title;
+		foreach( $brands as $key => $brand )
+			$allData['brands'][$brand->nid] = $brand->title;
+		
+		$allData['categories'] = array_unique($allData['categories']);
+		$allData['subcategories'] = array_unique($allData['subcategories']);
+		$allData['brands'] = array_unique($allData['brands']);
+		
+		cache_set('sbc-'.$language->language.'-'.$psCategory.$psSubcategory.$psBrand, $allData, 'cache', 1*60);
+		
+		$ps = '<div class="product-search"><span class="search-label">'.t('Category').'</span>'
+			.'<select id="categories-dropdown"><option key="0">-- '.t('All categories').' --</option>';
+		foreach( $allData['categories'] as $key => $category )
+			$ps .= '<option key="'.$key.'"'.(($psCategory == $key) ? ' selected="selected"' : '').'>'.$category.'</option>';
+		$ps .= '</select>';
+		
+		$ps .= '<span class="search-label">'.t('Subcategory').'</span>'
+			.'<select id="subcategories-dropdown"><option key="0">-- '.t('All subcategories').' --</option>';
+		foreach( $allData['subcategories'] as $key => $subcategory )
+			$ps .= '<option key="'.$key.'"'.(($psSubcategory == $key) ? ' selected="selected"' : '').'>'.$subcategory.'</option>';
+		$ps .= '</select>';
+		
+		$ps .= '<span class="search-label">'.t('Brand').'</span>'
+			.'<select id="producer-dropdown"><option key="0">-- '.t('All brands').' --</option>';
+		foreach( $allData['brands'] as $key => $brand )
+			$ps .= '<option key="'.$key.'"'.(($psBrand == $key) ? ' selected="selected"' : '').'>'.$brand.'</option>';
+		$ps .= '</select>';
+		
+		$ps .= '<button class="simple-orange">'.t('Show').'</button>';
+		$ps .= '</div>';
+	}
+	
+	return $ps;
+}
+
+function _get_search_bar_ajax() {
+	$category = isset($_GET['category']) ? $_GET['category'] : 0;
+	$subcategory = isset($_GET['subcategory']) ? $_GET['subcategory'] : 0;
+	$producer = isset($_GET['producer']) ? $_GET['producer'] : 0;
+	
+	echo get_search_bar($category, $subcategory, $producer);
+}
+
+function tehnoprah_menu_alter(&$items) {
+    // Example - disable the page at node/add
+    $items['user/password']['access callback'] = FALSE;
+	
+	return array(
+        'mypage' => array(
+            'title' => 'A page to test ajax',
+            'page callback' => 'drupal_get_form',
+            'page arguments' => array('tehnoprah_page'),
+            'access arguments' => array('access content'), 
+        )
+    );
+}
+
+function tehnoprah_form_alter(&$form, &$form_state, $form_id) {
+	global $language;
+    if( isset($form['type']) && isset($form['type']['#value']) && $form['type']['#value'] == 'category' ) {
+		$form['field_subcategories']['#access'] = false;
+	} elseif( isset($form['type']) && isset($form['type']['#value']) && $form['type']['#value'] == 'subcategory' ) {
+		$newOptions = [];
+		foreach( $form['field_belongs_to']['und']['#options'] as $key => $option ) {
+			$node = node_load($key);
+			if( isset($node) && isset($node->language) && $node->language == $form['language']['#default_value'] )
+				$newOptions[$key] = $option;
+			elseif( !isset($node->language) )
+				$newOptions[$key] = $option;
+		}
+		$form['field_belongs_to']['und']['#options'] = $newOptions;
+	} elseif( isset($form['type']) && isset($form['type']['#value']) && $form['type']['#value'] == 'product' ) {
+		$newOptions = [];
+		foreach( $form['field_category']['und']['#options'] as $key => $option ) {
+			$node = node_load($key);
+			if( isset($node) && isset($node->language) && $node->language == $form['language']['#default_value'] )
+				$newOptions[$key] = $option;
+			elseif( !isset($node->language) )
+				$newOptions[$key] = $option;
+		}
+		$form['field_category']['und']['#options'] = $newOptions;
+		
+		$newOptions = [];
+		
+		foreach( $form['field_subcategory']['und']['#options'] as $key => $option ) {
+			$node = node_load($key);
+			if( isset($node) && isset($node->language) && $node->language == $form['language']['#default_value'] )
+				$newOptions[$key] = $option;
+			elseif( !isset($node->language) )
+				$newOptions[$key] = $option;
+		}
+		$form['field_subcategory']['und']['#options'] = $newOptions;
+		
+		$newOptions = [];
+		foreach( $form['field_brand']['und']['#options'] as $key => $option ) {
+			$node = node_load($key);
+			if( isset($node) && isset($node->language) && $node->language == $form['language']['#default_value'] )
+				$newOptions[$key] = $option;
+			elseif( !isset($node->language) )
+				$newOptions[$key] = $option;
+		}
+		$form['field_brand']['und']['#options'] = $newOptions;
+	}
+	//dpm($form);
+}
+
+function tehnoprah_node_submit($node, $form, &$form_state) {
+	if( $node->type == 'category' ) {
+		//dpm($node);
+		$node->menu['enabled'] = 1;
+		$node->menu['language'] = $node->language;
+		$node->menu['menu_name'] = 'main-menu';
+		$query = new EntityFieldQuery();
+		$query->entityCondition('entity_type', 'node')
+			->entityCondition('bundle', 'category_page')
+			->entityCondition('language', $node->language);
+		if( $result = $query->execute() ) {
+			foreach( $result['node'] as $key => $target ) {
+				$catpage = node_load($key);
+				$catpage->field_categories['und'][]['target_id'] = $key;
+			}
+		}
+	}
+}
+
+function tehnoprah_node_insert($node) {
+	if( $node->type == 'subcategory' ) {
+		$category = node_load($node->field_belongs_to['und'][0]['target_id']);
+		if(!isset($category->field_subcategories['und'])) {
+			$category->field_subcategories = [];
+			$category->field_subcategories['und'] = [];
+		}
+		//dpm($node);
+		$key = count($category->field_subcategories['und']);
+		$category->field_subcategories['und'][$key] = [];
+		$category->field_subcategories['und'][$key]['target_id'] = $node->nid;
+		$category = node_submit($category);
+		node_save($category);
+	}
+}
+
+function tehnoprah_node_update($node) {
+	if( $node->type == 'subcategory' ) {
+		$category = node_load($node->field_belongs_to['und'][0]['target_id']);
+		if(!isset($category->field_subcategories['und'])) {
+			$category->field_subcategories = [];
+			$category->field_subcategories['und'] = [];
+		}
+		$key = count($category->field_subcategories['und']);
+		$category->field_subcategories['und'][$key] = [];
+		$category->field_subcategories['und'][$key]['target_id'] = $node->nid;
+		$category = node_submit($category);
+		node_save($category);
+	}
+}
+
+function tehnoprah_node_presave($node) {
+	if( $node->type == 'subcategory' ) {
+		if(isset($node->original)) {
+			$oldCategory = node_load($node->original->field_belongs_to['und'][0]['target_id']);
+			if(isset($oldCategory->field_subcategories['und']))
+				foreach($oldCategory->field_subcategories['und'] as $key => $subcategory)
+					if($subcategory['target_id'] == $node->nid)
+						unset($oldCategory->field_subcategories['und'][$key]);
+			$oldCategory = node_submit($oldCategory);
+			node_save($oldCategory);
+		}
+	} elseif( $node->type == 'product' ) {
+		if(isset($node->original)) {
+			$oldSubcategory = node_load($node->original->field_subcategory['und'][0]['target_id']);
+			$oldBrand = $node->original->field_subcategory['und'][0]['target_id'];
+			if(isset($oldSubcategory->field_brands['und']))
+				foreach($oldSubcategory->field_brands['und'] as $key => $brand)
+					if($brand['target_id'] == $oldBrand)
+						unset($oldSubcategory->field_brands['und'][$key]);
+			$oldSubcategory = node_submit($oldSubcategory);
+			node_save($oldSubcategory);
+		}
+		$subcategory = node_load($node->field_subcategory['und'][0]['target_id']);
+		if(!isset($subcategory->field_brands['und'])) {
+			$subcategory->field_brands = [];
+			$subcategory->field_brands['und'] = [];
+		}
+		$key = count($subcategory->field_brands['und']);
+		$subcategory->field_brands['und'][$key] = [];
+		$subcategory->field_brands['und'][$key]['target_id'] = $node->field_brand['und'][0]['target_id'];
+		$subcategory = node_submit($subcategory);
+		node_save($subcategory);
+	}
+}
+
+function tehnoprah_pathauto_alias_alter(&$alias, &$context){
+    $alias = removeAccents($alias);
+}
+
+function removeAccents($str){
+    $a = array('À', 'Á', 'Â', 'Ã', 'Ä', 'Å', 'Æ', 'Ç', 'È', 'É', 'Ê', 'Ë', 'Ì', 'Í', 'Î', 'Ï', 'Ð', 'Ñ', 'Ò', 'Ó', 'Ô', 'Õ', 'Ö', 'Ø', 'Ù', 'Ú', 'Û', 'Ü', 'Ý', 'ß', 'à', 'á', 'â', 'ã', 'ä', 'å', 'æ', 'ç', 'è', 'é', 'ê', 'ë', 'ì', 'í', 'î', 'ï', 'ñ', 'ò', 'ó', 'ô', 'õ', 'ö', 'ø', 'ù', 'ú', 'û', 'ü', 'ý', 'ÿ', 'Ā', 'ā', 'Ă', 'ă', 'Ą', 'ą', 'Ć', 'ć', 'Ĉ', 'ĉ', 'Ċ', 'ċ', 'Č', 'č', 'Ď', 'ď', 'Đ', 'đ', 'Ē', 'ē', 'Ĕ', 'ĕ', 'Ė', 'ė', 'Ę', 'ę', 'Ě', 'ě', 'Ĝ', 'ĝ', 'Ğ', 'ğ', 'Ġ', 'ġ', 'Ģ', 'ģ', 'Ĥ', 'ĥ', 'Ħ', 'ħ', 'Ĩ', 'ĩ', 'Ī', 'ī', 'Ĭ', 'ĭ', 'Į', 'į', 'İ', 'ı', 'Ĳ', 'ĳ', 'Ĵ', 'ĵ', 'Ķ', 'ķ', 'Ĺ', 'ĺ', 'Ļ', 'ļ', 'Ľ', 'ľ', 'Ŀ', 'ŀ', 'Ł', 'ł', 'Ń', 'ń', 'Ņ', 'ņ', 'Ň', 'ň', 'ŉ', 'Ō', 'ō', 'Ŏ', 'ŏ', 'Ő', 'ő', 'Œ', 'œ', 'Ŕ', 'ŕ', 'Ŗ', 'ŗ', 'Ř', 'ř', 'Ś', 'ś', 'Ŝ', 'ŝ', 'Ş', 'ş', 'Š', 'š', 'Ţ', 'ţ', 'Ť', 'ť', 'Ŧ', 'ŧ', 'Ũ', 'ũ', 'Ū', 'ū', 'Ŭ', 'ŭ', 'Ů', 'ů', 'Ű', 'ű', 'Ų', 'ų', 'Ŵ', 'ŵ', 'Ŷ', 'ŷ', 'Ÿ', 'Ź', 'ź', 'Ż', 'ż', 'Ž', 'ž', 'ſ', 'ƒ', 'Ơ', 'ơ', 'Ư', 'ư', 'Ǎ', 'ǎ', 'Ǐ', 'ǐ', 'Ǒ', 'ǒ', 'Ǔ', 'ǔ', 'Ǖ', 'ǖ', 'Ǘ', 'ǘ', 'Ǚ', 'ǚ', 'Ǜ', 'ǜ', 'Ǻ', 'ǻ', 'Ǽ', 'ǽ', 'Ǿ', 'ǿ', '°');
+    $b = array('A', 'A', 'A', 'A', 'A', 'A', 'AE', 'C', 'E', 'E', 'E', 'E', 'I', 'I', 'I', 'I', 'D', 'N', 'O', 'O', 'O', 'O', 'O', 'O', 'U', 'U', 'U', 'U', 'Y', 's', 'a', 'a', 'a', 'a', 'a', 'a', 'ae', 'c', 'e', 'e', 'e', 'e', 'i', 'i', 'i', 'i', 'n', 'o', 'o', 'o', 'o', 'o', 'o', 'u', 'u', 'u', 'u', 'y', 'y', 'A', 'a', 'A', 'a', 'A', 'a', 'C', 'c', 'C', 'c', 'C', 'c', 'C', 'c', 'D', 'd', 'D', 'd', 'E', 'e', 'E', 'e', 'E', 'e', 'E', 'e', 'E', 'e', 'G', 'g', 'G', 'g', 'G', 'g', 'G', 'g', 'H', 'h', 'H', 'h', 'I', 'i', 'I', 'i', 'I', 'i', 'I', 'i', 'I', 'i', 'IJ', 'ij', 'J', 'j', 'K', 'k', 'L', 'l', 'L', 'l', 'L', 'l', 'L', 'l', 'l', 'l', 'N', 'n', 'N', 'n', 'N', 'n', 'n', 'O', 'o', 'O', 'o', 'O', 'o', 'OE', 'oe', 'R', 'r', 'R', 'r', 'R', 'r', 'S', 's', 'S', 's', 'S', 's', 'S', 's', 'T', 't', 'T', 't', 'T', 't', 'U', 'u', 'U', 'u', 'U', 'u', 'U', 'u', 'U', 'u', 'U', 'u', 'W', 'w', 'Y', 'y', 'Y', 'Z', 'z', 'Z', 'z', 'Z', 'z', 's', 'f', 'O', 'o', 'U', 'u', 'A', 'a', 'I', 'i', 'O', 'o', 'U', 'u', 'U', 'u', 'U', 'u', 'U', 'u', 'U', 'u', 'A', 'a', 'AE', 'ae', 'O', 'o', '-');
+    return str_replace($a, $b, $str);
+}
+
+function sort_products($category = 0, $subcategory = 0, $brand = 0, $page = 1, $count = 10) {
+	global $language;
+	
+	$query = new EntityFieldQuery();
+	$query->entityCondition('entity_type', 'node')
+			->entityCondition('bundle', 'product');
+	if($brand > 0)
+		$query->fieldCondition('field_brand', 'target_id', $brand, '=');
+	if($subcategory > 0)
+		$query->fieldCondition('field_subcategory', 'target_id', $subcategory, '=');
+	if($category > 0)
+		$query->fieldCondition('field_category', 'target_id', $category, '=');
+	$query->propertyOrderBy('title');
+	$countQuery = clone($query);
+	$totalResults = $countQuery->count()->execute();
+	$query->range(($page-1)*$count, $count);
+	
+	$allProducts = [];
+	$allProducts['total'] = $totalResults;
+	$allProducts['products'] = [];
+	if( $result = $query->execute() ) {
+		$productPageImageStyle = image_style_load('product_page_style');
+		$i = 0;
+		foreach($result['node'] as $key => $prod) {
+			$product = node_load($key);
+			$allProducts['products'][$key] = [];
+			$allProducts['products'][$key]['title'] = $product->title;
+			if(isset($product->field_image['und'])) {
+				image_style_create_derivative($productPageImageStyle, $product->field_image['und'][0]['uri'], image_style_path('product_page_style', $product->field_image['und'][0]['uri']));
+				$allProducts['products'][$key]['imgSrc'] = $GLOBALS['base_path'].'sites/default/files'.substr(image_style_path('product_page_style', $product->field_image['und'][0]['uri']), 8);
+				$allProducts['products'][$key]['imgAlt'] = (isset($product->field_image['und'][0]['alt']) ? $product->field_image['und'][0]['alt'] : '');
+				$allProducts['products'][$key]['imgTitle'] = (isset($product->field_image['und'][0]['title']) ? $product->field_image['und'][0]['title'] : '');
+			}
+			$allProducts['products'][$key]['body'] = (isset($product->body['und']) ? $product->body['und'][0]['summary'] : '');
+			$allProducts['products'][$key]['productLink'] = '/'.$language->language.'/'.drupal_get_path_alias('node/'.$product->nid);
+			++$i;
+		}
+	}
+	
+	return json_encode($allProducts);
+}
+
+function _get_sort_products() {
+	$category = isset($_GET['category']) ? $_GET['category'] : 0;
+	$subcategory = isset($_GET['subcategory']) ? $_GET['subcategory'] : 0;
+	$producer = isset($_GET['producer']) ? $_GET['producer'] : 0;
+	$productPage = isset($_GET['page']) ? $_GET['page'] : 1;
+	
+	echo sort_products($category, $subcategory, $producer, $productPage);
+}
+
+function _send_email_from_object(){
+	$message = '<table><tbody><tr><td>Ime i prezime: </td><td>'.$_GET['name'].'</td></tr><tr><td>Email: </td><td>'.$_GET['email'].'</td></tr><tr><td>Naslov poruke: </td><td>'.$_GET['subject'].'</td></tr><tr><td>Text poruke: </td><td>'.$_GET['body'].'</td></tr><tr><td>URL stranice</td><td>'.$_GET['url'].'</td></tr></tbody></table>';
+    $site_email = variable_get('site_mail', '');
+    $to = $site_email;
+    $from = (isset($_GET['email'])) ? $_GET['email'] : 'admin@tehnoprah.hr';
+	
+    $subject = (isset($_GET['subject'])) ? $_GET['subject'] : '';
+
+    $mail = drupal_mail('tehnoprah', 'reply', $to, language_default(), array('body' => $message, 'subject' => $subject, 'from' => $from, 'reply' => $from), $from, TRUE);
+	//dpm($mail);
+    if($mail['result']==true){
+        echo t('Poruka je uspješno poslana!');
+    }else{
+        echo t('Poruka nije poslana! Molimo, pokušajte kasnije.');
+    }
+}
+
+function tehnoprah_mail($key, &$message, $params) {
+	$message['subject'] = $params['subject'];
+	$message['body'][] = $params['body'];
+    
+	$headers = array(
+		'MIME-Version' => '1.0',
+		'Content-Type' => 'text/html; charset=UTF-8; format=flowed',
+		'Content-Transfer-Encoding' => 'base64',
+		'From' => $params['from'],
+		'Reply-To' => $params['reply'],
+		//'Sender' => '',
+		'X-Mailer' => 'PHP/'.phpversion()
+	  );
+
+	foreach ($headers as $key => $value) {
+		$message['headers'][$key] = $value;
+    }
+}
+
+function _admin_subcategories() {
+	$categories = node_load_multiple(array(isset($_GET['category']) ? $_GET['category'] : 0));
+	$tmpSubcategories = array();
+	foreach( $categories as $key => $category )
+		foreach( $category->field_subcategories['und'] as $key => $subcategory )
+			$tmpSubcategories[] = node_load($subcategory['target_id']);
+	//dpm($tmpSubcategories);
+	usort($tmpSubcategories, 'custom_title_compare');
+	$subcategories = array();
+	foreach( $tmpSubcategories as $key => $subcategory )
+		$subcategories[] = $subcategory->nid;
+	echo json_encode($subcategories);
+}
+
+function _change_language() {
+	$newLang = isset($_GET['language']) ? $_GET['language'] : 'hr';
+	$nid = isset($_GET['nid']) ? $_GET['nid'] : 2;
+	$node = node_load_multiple(array($nid));
+	foreach( $node as $key => $n ) {
+		if(isset($n->tnid) && $n->tnid > 2) {
+			$newNode = node_load_multiple(array(), array('language' => $newLang, 'tnid' => $n->tnid));
+			foreach( $newNode as $nkey => $nn ) {
+				echo '/'.$newLang.'/'.drupal_get_path_alias('node/'.$nn->nid);
+				break;
+			}
+		} else {
+			echo '/'.$newLang;
+		}
+		break;
+	}
+}
+
+function _copy_all_nodes($bundle, $langFrom = 'hr', $langTo = 'hr') {
+    global $user;
+    global $base_path;
+    global $language;
+    
+    $allNodes = node_load_multiple(array(), array('type' => $bundle, 'language' => $langFrom));
+    foreach($allNodes as $key => $oldNode) { 
+        $newNode = new stdClass();
+        if( !node_load_multiple(array(), array('type' => $bundle, 'language' => $langTo, 'tnid' => $oldNode->nid)) ) {
+            $newNode->type = $oldNode->type;
+            node_object_prepare($newNode); 
+            $newNode->uid = 1;
+            foreach($oldNode as $key2 => $data) {
+                switch( $key2 ) {
+                    case 'vid': break;
+                    case 'uid': break;
+                    case 'nid': break;
+                    case 'language': break;
+                    case 'changed': break;
+                    case 'revision_timestamp': break;
+                    case 'revision_uid': break;
+                    case 'cid': break;
+                    case 'last_comment_timestamp': break;
+                    case 'last_comment_name': break;
+                    case 'last_comment_uid': break;
+                    case 'comment_count': break;
+                    case 'menu': break;
+                    case 'comment': break;
+                    case 'data': break;
+                    default: 
+                        if(!(isset($data['und']) && (isset($data['und'][0]['entity']) || (isset($data['und'][0]['target_id']) && $data['und'][0]['target_id']))))
+                            $newNode->$key2 = $data;
+                        elseif (isset($data['und'])) {
+                            unset($data['und']);
+                            $newNode->$key2 = $data;
+                        }
+                }
+            }
+            $newNode->language = $langTo;
+            if(!isset($oldNode->tnid) || $oldNode->tnid <= 6) {
+                $oldNode->tnid = $oldNode->nid;
+                node_save($oldNode);
+            }
+            $newNode->tnid = $oldNode->tnid;
+            $newNode = node_submit($newNode);
+            node_save($newNode);
+            dpm($newNode);
+        }
+    }
+}
+
+function _site_search() {
+	if( isset($_GET['qstr']) && strlen($_GET['qstr']) > 0 && isset($_GET['lang']) ) {
+		$query = new EntityFieldQuery();
+		
+		$query->entityCondition('entity_type', 'node')
+		->entityCondition('bundle', array('article', 'basic_article', 'category', 'product'), 'IN');
+		foreach(explode(' ', $_GET['qstr']) as $key => $word) {
+			$query->propertyCondition('title', '%'.$word.'%', 'LIKE');
+		}
+		$query->propertyCondition('language', $_GET['lang'], '=')
+		->propertyCondition('status', NODE_PUBLISHED)
+		->propertyOrderBy('title', 'ASC')
+		->propertyOrderBy('type', 'ASC');
+		$nodes = $query->execute();
+		
+		$result = [];
+		$result['results'] = [];
+		$i = 0;
+		if( isset($nodes['node']) ) {
+			foreach( $nodes as $firstKey => $obj ) {
+				foreach( $obj as $key => $node ) {
+					$node = node_load($key);
+					$bundle = '';
+					switch($node->type) {
+						case 'article': $bundle = t('članak'); break;
+						case 'basic_article': $bundle = t('članak'); break;
+						case 'category': $bundle = t('kategorija'); break;
+						case 'product': $bundle = t('proizvod'); break;
+					}
+					$result['results'][$i] = [];
+					$result['results'][$i]['title'] = $node->title.' ('.$bundle.')';
+					$result['results'][$i++]['URL'] = '/'.$node->language.'/'.drupal_get_path_alias('node/'.$key);
+				}
+			}
+		}
+		
+		$result['qstr'] = $_GET['qstr'];
+		echo json_encode($result);
+	} else {
+		echo '[]';
+	}
+}
